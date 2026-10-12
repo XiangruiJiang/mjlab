@@ -916,7 +916,7 @@ def test_visual_collision_split_inertia_matches_independent_compile():
 
   body_mass = result.wp_model.body_mass.numpy()
   w2v = result.world_to_variant["object/"]
-  obj_body = result.mj_model.nbody - 1
+  obj_body = result.mj_model.body("object/prop").id
 
   sphere_w = int(np.where(w2v == 0)[0][0])
   cone_w = int(np.where(w2v == 1)[0][0])
@@ -961,8 +961,8 @@ def test_variant_order_irrelevant_per_variant_compile():
   res_ab = build_variant_model(scene_ab, 4, vi_ab)
   res_ba = build_variant_model(scene_ba, 4, vi_ba)
 
-  obj_body_ab = res_ab.mj_model.nbody - 1
-  obj_body_ba = res_ba.mj_model.nbody - 1
+  obj_body_ab = res_ab.mj_model.body("object/prop").id
+  obj_body_ba = res_ba.mj_model.body("object/prop").id
 
   body_mass_ab = res_ab.wp_model.body_mass.numpy()
   body_mass_ba = res_ba.wp_model.body_mass.numpy()
@@ -1147,11 +1147,13 @@ def test_padding_slots_get_disabled():
 
   # Find a sphere world (variant 0, 3 mesh geoms -> 2 padding slots).
   sphere_world = int(np.where(w2v == 0)[0][0])
-  # Find mesh geom columns (skip non-mesh geoms like worldbody).
+  # Find the object's mesh geom columns (skip non-mesh geoms and hull holders).
+  obj_body = result.mj_model.body("object/prop").id
   mesh_geom_ids = [
     gid
     for gid in range(result.mj_model.ngeom)
     if result.mj_model.geom_type[gid] == mujoco.mjtGeom.mjGEOM_MESH
+    and result.mj_model.geom_bodyid[gid] == obj_body
   ]
   sphere_dataid = dataid[sphere_world, mesh_geom_ids]
   # Last 2 mesh geom slots should be -1 (disabled padding).
