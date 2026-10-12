@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 import mujoco
+import numpy as np
 
 # Inertial fields that shift subtree_com (and thus the tracking camera).
 VIEWER_INERTIAL_FIELDS = frozenset({"body_ipos", "body_mass"})
@@ -90,8 +91,21 @@ def sync_model_fields(
   fields: set[str] | frozenset[str],
   env_idx: int,
 ) -> None:
-  """Copy per-world model fields from sim_model[env_idx] into dst_model."""
+  """Copy per-world model fields from sim_model[env_idx] into dst_model.
+
+  A mesh slot the env's variant leaves unfilled (``geom_dataid`` -1) is absent
+  to MuJoCo Warp but a mesh geom without a mesh to CPU MuJoCo, whose collision
+  then reads invalid memory; such geoms get no contact bits in dst_model, the
+  others the sim model's.
+  """
   for field_name in fields:
     src = getattr(sim_model, field_name)[env_idx].cpu().numpy()
     dst = getattr(dst_model, field_name)
     dst[:] = src.reshape(dst.shape)
+  if "geom_dataid" in fields:
+    missing = (dst_model.geom_type == mujoco.mjtGeom.mjGEOM_MESH) & (
+      dst_model.geom_dataid < 0
+    )
+    for field_name in ("geom_contype", "geom_conaffinity"):
+      bits = getattr(sim_model, field_name).cpu().numpy()
+      getattr(dst_model, field_name)[:] = np.where(missing, 0, bits)
