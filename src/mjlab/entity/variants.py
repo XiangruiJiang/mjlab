@@ -1104,6 +1104,56 @@ def _qualified_slot_geom_name(entity_prefix: str, template_geom_name: str) -> st
   return f"{entity_prefix}{template_geom_name}"
 
 
+_HULL_HOLDER_BIT = 1 << 30
+"""Contact bit of the hull holder geoms; no other geom sets it, so they never collide."""
+
+
+def _hold_collision_hulls(
+  spec: mujoco.MjSpec,
+  model: mujoco.MjModel,
+  variant_info: list[tuple[str, VariantMetadata]],
+) -> bool:
+  """Give every collision-slot variant mesh without hull data a holder geom.
+
+  MuJoCo builds a file mesh's convex-hull graph and polygons only when a
+  colliding geom references it, and the merged template references one
+  mesh per slot. A world whose slot selects another variant's mesh would
+  collide without that data, which leaves MuJoCo Warp one contact per geom
+  pair. A holder geom per such mesh, on a static body appended to the
+  scene (existing body and geom ids keep their values) and on a contact
+  bit no other geom sets, makes MuJoCo build it without adding contacts.
+  Returns whether any holder was added, i.e. whether ``spec`` needs
+  recompiling.
+  """
+  holder: mujoco.MjsBody | None = None
+  held: set[str] = set()
+  for entity_prefix, metadata in variant_info:
+    for v_idx, slot_specs in enumerate(metadata.variant_slot_specs):
+      for slot, gspec in zip(metadata.slots, slot_specs, strict=True):
+        if gspec is None or slot.key.role != "collision":
+          continue
+        mesh_name = _qualified_mesh_name(
+          entity_prefix, metadata.variant_names[v_idx], gspec.mesh_name
+        )
+        mid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MESH, mesh_name)
+        if model.mesh_graphadr[mid] >= 0 or mesh_name in held:
+          continue
+        if holder is None:
+          holder = spec.worldbody.add_body(name="mjlab/hull_holder")
+        holder.add_geom(
+          name=f"mjlab/hull_holder/{mesh_name}",
+          type=mujoco.mjtGeom.mjGEOM_MESH,
+          meshname=mesh_name,
+          contype=_HULL_HOLDER_BIT,
+          conaffinity=_HULL_HOLDER_BIT,
+          group=5,
+          rgba=(0.0, 0.0, 0.0, 0.0),
+          density=0.0,
+        )
+        held.add(mesh_name)
+  return holder is not None
+
+
 def _populate_dependent_fields(
   m: mjwarp.Model,
   padded_model: mujoco.MjModel,
@@ -1336,6 +1386,8 @@ def build_variant_model(
   """
   spec = spec.copy()
   model = spec.compile()
+  if _hold_collision_hulls(spec, model, variant_info):
+    model = spec.compile()
   if configure_model is not None:
     configure_model(model)
 
