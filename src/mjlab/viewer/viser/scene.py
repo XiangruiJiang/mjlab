@@ -232,10 +232,13 @@ class MjlabViserScene(ViserMujocoScene, DebugVisualizer):
   ) -> None:
     self._sim_model = sim_model
     self._expanded_fields = expanded_fields or set()
-    self._baked_appearance_fields = (
-      self._expanded_fields & _VISER_APPEARANCE_HANDLE_FIELDS
-    )
-    self._baked_appearance_fingerprint: tuple[tuple[str, bytes], ...] | None = None
+    # Per-world fields baked into the mesh handles; a change (e.g. a mesh or color
+    # written at reset) rebuilds them, reusing the meshes and hulls of the
+    # variants built before.
+    self._baked_fields = self._expanded_fields & _VISER_BAKED_HANDLE_FIELDS
+    self._baked_values: dict[str, torch.Tensor] = {}
+    self._variant_meshes: dict[tuple[object, ...], trimesh.Trimesh] = {}
+    self._variant_hulls: dict[tuple[object, ...], trimesh.Trimesh | None] = {}
     self._use_per_world_mesh_groups = bool(
       self._expanded_fields & _VISER_BAKED_HANDLE_FIELDS
     )
@@ -252,7 +255,7 @@ class MjlabViserScene(ViserMujocoScene, DebugVisualizer):
       )
       disable_model_sameframe_shortcuts(mj_model)
     super().__init__(server, mj_model, num_envs)
-    self._baked_appearance_fingerprint = self._appearance_fingerprint()
+    self._baked_values = self._baked_field_values()
 
     self.debug_visualization_enabled = False
     self.show_all_envs = False
@@ -393,23 +396,22 @@ class MjlabViserScene(ViserMujocoScene, DebugVisualizer):
     sync_model_fields(self.mj_model, self._sim_model, fields, env_idx)
     self._rebuild_visual_handles_if_needed()
 
-  def _appearance_fingerprint(self) -> tuple[tuple[str, bytes], ...] | None:
-    """Return a stable fingerprint for fields baked into Viser mesh handles."""
-    if self._sim_model is None or not self._baked_appearance_fields:
-      return None
-    parts: list[tuple[str, bytes]] = []
-    for field_name in sorted(self._baked_appearance_fields):
-      value = getattr(self._sim_model, field_name).cpu().numpy()
-      parts.append((field_name, value.tobytes()))
-    return tuple(parts)
+  def _baked_field_values(self) -> dict[str, torch.Tensor]:
+    """Copies (on the sim device) of the per-world fields baked into the handles."""
+    if self._sim_model is None:
+      return {}
+    return {
+      field_name: getattr(self._sim_model, field_name).clone()
+      for field_name in self._baked_fields
+    }
 
   def _rebuild_visual_handles_if_needed(self) -> None:
-    if self._baked_appearance_fingerprint is None:
+    if not self._baked_values or all(
+      torch.equal(getattr(self._sim_model, field_name), value)
+      for field_name, value in self._baked_values.items()
+    ):
       return
-    fingerprint = self._appearance_fingerprint()
-    if fingerprint == self._baked_appearance_fingerprint:
-      return
-    self._baked_appearance_fingerprint = fingerprint
+    self._baked_values = self._baked_field_values()
     self.rebuild_visual_handles()
 
   @staticmethod
@@ -471,8 +473,10 @@ class MjlabViserScene(ViserMujocoScene, DebugVisualizer):
           key = (fp, group_id, sub_idx)
           variant = variants.get(key)
           if variant is None:
+            if key not in self._variant_meshes:
+              self._variant_meshes[key] = merge_geoms(self.mj_model, sub_geom_ids)
             variant = _VariantMeshGroup(
-              mesh=merge_geoms(self.mj_model, sub_geom_ids),
+              mesh=self._variant_meshes[key],
               group_id=group_id,
               sub_idx=sub_idx,
               body_name=get_body_name(self.mj_model, body_id),
@@ -594,7 +598,9 @@ class MjlabViserScene(ViserMujocoScene, DebugVisualizer):
         key = (body_id, fingerprint)
         v = variants.get(key)
         if v is None:
-          hull = _compute_body_hull(self.mj_model, geom_ids)
+          if key not in self._variant_hulls:
+            self._variant_hulls[key] = _compute_body_hull(self.mj_model, geom_ids)
+          hull = self._variant_hulls[key]
           if hull is None:
             continue
           v = _HullVariant(
